@@ -119,6 +119,8 @@ def getValue(name, new, old, default=0.0):
 # Probing class and linear interpolation
 # =============================================================================
 class Probe:
+    SCATTERED_HEADER = "# bCNC probe scattered v1"
+
     def __init__(self):
         self.init()
 
@@ -141,6 +143,8 @@ class Probe:
 
         self.points = []  # probe points
         self.matrix = []  # 2D matrix with Z coordinates
+        self.targets = []  # planned X-Y locations for scattered probing
+        self.mode = "grid"
         self.zeroed = False  # if probe was zeroed at any location
         self.start = False  # start collecting probes
         self.saved = False
@@ -149,12 +153,16 @@ class Probe:
     def clear(self):
         del self.points[:]
         del self.matrix[:]
+        del self.targets[:]
+        self.mode = "grid"
         self.zeroed = False
         self.start = False
         self.saved = False
 
     # ----------------------------------------------------------------------
     def isEmpty(self):
+        if self.mode == "scattered":
+            return len(self.points) == 0
         return len(self.matrix) == 0
 
     # ----------------------------------------------------------------------
@@ -181,6 +189,29 @@ class Probe:
                     return map(float, line.split())
 
         f = open(self.filename)
+        first = f.readline().strip()
+        if first == self.SCATTERED_HEADER:
+            self.mode = "scattered"
+            self.xmin, self.xmax, self.xn = read(f)
+            self.ymin, self.ymax, self.yn = read(f)
+            self.zmin, self.zmax, feed = read(f)
+            CNC.vars["prbfeed"] = feed
+            count = int(next(read(f)))
+            self.xn = max(2, int(self.xn))
+            self.yn = max(2, int(self.yn))
+            self.xstep()
+            self.ystep()
+            records = [tuple(read(f)) for _ in range(count)]
+            self.targets = [(x, y) for x, y, _ in records]
+            self.start = True
+            for x, y, z in records:
+                self.add(x, y, z)
+            self.start = False
+            self.saved = True
+            f.close()
+            return
+
+        f.seek(0)
         self.xmin, self.xmax, self.xn = read(f)
         self.ymin, self.ymax, self.yn = read(f)
         self.zmin, self.zmax, feed = read(f)
@@ -213,18 +244,35 @@ class Probe:
         ext = ext.lower()
 
         f = open(filename, "w")
+        if self.mode == "scattered" and ext != ".xyz":
+            self.filename = filename
+            f.write(f"{self.SCATTERED_HEADER}\n")
+            f.write(f"{self.xmin:g} {self.xmax:g} {int(self.xn)}\n")
+            f.write(f"{self.ymin:g} {self.ymax:g} {int(self.yn)}\n")
+            f.write(f"{self.zmin:g} {self.zmax:g} {CNC.vars['prbfeed']:g}\n")
+            f.write(f"{len(self.points)}\n")
+            for x, y, z in self.points:
+                f.write(f"{x:g} {y:g} {z:g}\n")
+            f.close()
+            self.saved = True
+            return
+
         if ext != ".xyz":
             self.filename = filename
             f.write(f"{self.xmin:g} {self.xmax:g} {int(self.xn)}\n")
             f.write(f"{self.ymin:g} {self.ymax:g} {int(self.yn)}\n")
             f.write(f"{self.zmin:g} {self.zmax:g} {CNC.vars['prbfeed']:g}\n")
             f.write("\n\n")
-        for j in range(self.yn):
-            y = self.ymin + self._ystep * j
-            for i in range(self.xn):
-                x = self.xmin + self._xstep * i
-                f.write(f"{x:g} {y:g} {self.matrix[j][i]:g}\n")
-            f.write("\n")
+        if self.mode == "scattered":
+            for x, y, z in self.points:
+                f.write(f"{x:g} {y:g} {z:g}\n")
+        else:
+            for j in range(self.yn):
+                y = self.ymin + self._ystep * j
+                for i in range(self.xn):
+                    x = self.xmin + self._xstep * i
+                    f.write(f"{x:g} {y:g} {self.matrix[j][i]:g}\n")
+                f.write("\n")
         f.close()
         self.saved = True
 
@@ -237,16 +285,17 @@ class Probe:
 
         with open(self.filename, "wb") as fp:
             writer = Binary_STL_Writer(fp)
+            matrix = self.surfaceMatrix()
             for j in range(self.yn - 1):
                 y1 = self.ymin + self._ystep * j
                 y2 = self.ymin + self._ystep * (j + 1)
                 for i in range(self.xn - 1):
                     x1 = self.xmin + self._xstep * i
                     x2 = self.xmin + self._xstep * (i + 1)
-                    v1 = [x1, y1, self.matrix[j][i]]
-                    v2 = [x2, y1, self.matrix[j][i + 1]]
-                    v3 = [x2, y2, self.matrix[j + 1][i + 1]]
-                    v4 = [x1, y2, self.matrix[j + 1][i]]
+                    v1 = [x1, y1, matrix[j][i]]
+                    v2 = [x2, y1, matrix[j][i + 1]]
+                    v3 = [x2, y2, matrix[j + 1][i + 1]]
+                    v4 = [x1, y2, matrix[j + 1][i]]
                     writer.add_face([v1, v2, v3, v4])
             writer.close()
 
@@ -277,32 +326,43 @@ class Probe:
     # ----------------------------------------------------------------------
     # Return the code needed to scan for autoleveling
     # ----------------------------------------------------------------------
-    def scan(self):
+    def scan(self, targets=None):
         self.clear()
+        if targets is not None:
+            self.mode = "scattered"
+            self.targets = [(float(x), float(y)) for x, y in targets]
         self.start = True
-        self.makeMatrix()
-        x = self.xmin
-        xstep = self._xstep
+        if self.mode == "grid":
+            self.makeMatrix()
+            scanTargets = []
+            x = self.xmin
+            xstep = self._xstep
+            for j in range(self.yn):
+                y = self.ymin + self._ystep * j
+                for _ in range(self.xn):
+                    scanTargets.append((x, y))
+                    x += xstep
+                x -= xstep
+                xstep = -xstep
+        else:
+            scanTargets = self.targets
+
         lines = [
             f"G0Z{CNC.vars['safe']:.4f}",
-            f"G0X{self.xmin:.4f}Y{self.ymin:.4f}",
         ]
-        for j in range(self.yn):
-            y = self.ymin + self._ystep * j
-            for i in range(self.xn):
-                lines.append(f"G0Z{self.zmax:.4f}")
-                lines.append(f"G0X{x:.4f}Y{y:.4f}")
-                lines.append("%wait")  # added for smoothie
-                lines.append(
-                    f"{CNC.vars['prbcmd']}Z{self.zmin:.4f}"
-                    f"F{CNC.vars['prbfeed']:g}"
-                )
-                lines.append("%wait")  # added for smoothie
-                x += xstep
-            x -= xstep
-            xstep = -xstep
+        for x, y in scanTargets:
+            lines.append(f"G0Z{self.zmax:.4f}")
+            lines.append(f"G0X{x:.4f}Y{y:.4f}")
+            lines.append("%wait")  # added for smoothie
+            lines.append(
+                f"{CNC.vars['prbcmd']}Z{self.zmin:.4f}"
+                f"F{CNC.vars['prbfeed']:g}"
+            )
+            lines.append("%wait")  # added for smoothie
         lines.append(f"G0Z{self.zmax:.4f}")
-        lines.append(f"G0X{self.xmin:.4f}Y{self.ymin:.4f}")
+        if scanTargets:
+            x, y = scanTargets[0]
+            lines.append(f"G0X{x:.4f}Y{y:.4f}")
         return lines
 
     # ----------------------------------------------------------------------
@@ -311,6 +371,13 @@ class Probe:
     def add(self, x, y, z):
         if not self.start:
             return
+        if self.mode == "scattered":
+            self.points.append([x, y, z])
+            self.saved = False
+            if len(self.points) >= len(self.targets):
+                self.start = False
+            return
+
         i = round((x - self.xmin) / self._xstep)
         if i < 0.0 or i > self.xn:
             return
@@ -340,11 +407,18 @@ class Probe:
     # Make z-level relative to the location of (x,y,0)
     # ----------------------------------------------------------------------
     def setZero(self, x, y):
-        del self.points[:]
         if self.isEmpty():
             self.zeroed = False
             return
         zero = self.interpolate(x, y)
+        if self.mode == "scattered":
+            for point in self.points:
+                point[2] -= zero
+            self.zeroed = True
+            self.saved = False
+            return
+
+        del self.points[:]
         self.xstep()
         self.ystep()
         for j, row in enumerate(self.matrix):
@@ -357,6 +431,56 @@ class Probe:
 
     # ----------------------------------------------------------------------
     def interpolate(self, x, y):
+        if self.mode == "scattered":
+            distances = []
+            for px, py, pz in self.points:
+                distance2 = (x - px) ** 2 + (y - py) ** 2
+                if distance2 < 1e-16:
+                    return pz
+                distances.append((distance2, px - x, py - y, pz))
+            if not distances:
+                return 0.0
+            distances.sort(key=lambda item: item[0])
+            nearest = distances[:8]
+
+            matrix = [[0.0] * 4 for _ in range(3)]
+            for distance2, dx, dy, pz in nearest:
+                weight = 1.0 / distance2
+                values = (dx, dy, 1.0)
+                for row in range(3):
+                    for column in range(3):
+                        matrix[row][column] += (
+                            weight * values[row] * values[column]
+                        )
+                    matrix[row][3] += weight * values[row] * pz
+
+            for column in range(3):
+                pivot = max(
+                    range(column, 3),
+                    key=lambda row: abs(matrix[row][column]),
+                )
+                if abs(matrix[pivot][column]) < 1e-12:
+                    break
+                matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+                divisor = matrix[column][column]
+                for item in range(column, 4):
+                    matrix[column][item] /= divisor
+                for row in range(3):
+                    if row == column:
+                        continue
+                    factor = matrix[row][column]
+                    for item in range(column, 4):
+                        matrix[row][item] -= factor * matrix[column][item]
+            else:
+                return matrix[2][3]
+
+            weighted = total = 0.0
+            for distance2, _, _, pz in nearest:
+                weight = 1.0 / distance2
+                weighted += weight * pz
+                total += weight
+            return weighted / total
+
         ix = (x - self.xmin) / self._xstep
         jy = (y - self.ymin) / self._ystep
         i = int(math.floor(ix))
@@ -402,6 +526,23 @@ class Probe:
 
         if dx == 0.0 and dy == 0.0:
             return [(x2, y2, z2 + self.interpolate(x2, y2))]
+
+        if self.mode == "scattered":
+            segments = []
+            count = max(
+                1,
+                int(math.ceil(max(
+                    abs(dx) / self._xstep,
+                    abs(dy) / self._ystep,
+                ))),
+            )
+            for index in range(1, count + 1):
+                ratio = index / float(count)
+                x = x1 + ratio * dx
+                y = y1 + ratio * dy
+                z = z1 + ratio * dz
+                segments.append((x, y, z + self.interpolate(x, y)))
+            return segments
 
         # Length along projection on X-Y plane
         rxy = math.sqrt(dx * dx + dy * dy)
@@ -457,6 +598,21 @@ class Probe:
 
         segments.append((x2, y2, z2 + self.interpolate(x2, y2)))
         return segments
+
+    # ----------------------------------------------------------------------
+    def surfaceMatrix(self):
+        if self.mode == "grid":
+            return self.matrix
+        return [
+            [
+                self.interpolate(
+                    self.xmin + self._xstep * i,
+                    self.ymin + self._ystep * j,
+                )
+                for i in range(self.xn)
+            ]
+            for j in range(self.yn)
+        ]
 
 
 # =============================================================================
@@ -3610,6 +3766,128 @@ class GCode:
             # since the starting (sxyz is after the rapid motion)
             block = self.blocks[bid - 1]
             self.cnc.initPath(block.ex, block.ey, block.ez)
+
+    # ----------------------------------------------------------------------
+    # Return probe locations sampled only from enabled spindle-on feed moves
+    # ----------------------------------------------------------------------
+    def cuttingProbePoints(self, xmin, xmax, ymin, ymax, xstep, ystep):
+        if xstep <= 0.0 or ystep <= 0.0:
+            return []
+
+        def clipLine(x1, y1, x2, y2):
+            dx = x2 - x1
+            dy = y2 - y1
+            low = 0.0
+            high = 1.0
+            for direction, distance in (
+                (-dx, x1 - xmin),
+                (dx, xmax - x1),
+                (-dy, y1 - ymin),
+                (dy, ymax - y1),
+            ):
+                if abs(direction) < 1e-15:
+                    if distance < 0.0:
+                        return None
+                    continue
+                ratio = distance / direction
+                if direction < 0.0:
+                    low = max(low, ratio)
+                else:
+                    high = min(high, ratio)
+                if low > high:
+                    return None
+            return (
+                x1 + low * dx,
+                y1 + low * dy,
+                x1 + high * dx,
+                y1 + high * dy,
+            )
+
+        points = []
+        seen = set()
+        spacing = min(xstep, ystep) / 2.0
+        spacing2 = spacing * spacing
+        buckets = {}
+
+        def addPoint(x, y):
+            key = (round(x, CNC.digits + 2), round(y, CNC.digits + 2))
+            if key in seen:
+                return
+            bucket = (
+                int(math.floor(x / spacing)),
+                int(math.floor(y / spacing)),
+            )
+            for u in range(bucket[0] - 1, bucket[0] + 2):
+                for v in range(bucket[1] - 1, bucket[1] + 2):
+                    for px, py in buckets.get((u, v), ()):
+                        if (x - px) ** 2 + (y - py) ** 2 < spacing2:
+                            return
+            seen.add(key)
+            points.append((x, y))
+            buckets.setdefault(bucket, []).append((x, y))
+
+        def addSegment(x1, y1, x2, y2):
+            clipped = clipLine(x1, y1, x2, y2)
+            if clipped is None:
+                return
+            x1, y1, x2, y2 = clipped
+            count = max(
+                1,
+                int(math.ceil(max(
+                    abs(x2 - x1) / xstep,
+                    abs(y2 - y1) / ystep,
+                ))),
+            )
+            for index in range(count + 1):
+                ratio = index / float(count)
+                addPoint(
+                    x1 + ratio * (x2 - x1),
+                    y1 + ratio * (y2 - y1),
+                )
+
+        cnc = CNC()
+        cnc.initPath(0.0, 0.0, 0.0)
+        spindleOn = False
+        for block in self.blocks:
+            if not block.enable:
+                continue
+            for line in block:
+                cmds = CNC.compileLine(line)
+                if cmds is None or not isinstance(cmds, (str, list)):
+                    continue
+                if isinstance(cmds, str):
+                    cmds = CNC.breakLine(cmds)
+                if not all(isinstance(cmd, str) for cmd in cmds):
+                    continue
+
+                lineSpindle = spindleOn
+                for cmd in cmds:
+                    if cmd[0].upper() != "M":
+                        continue
+                    try:
+                        mcode = int(float(cmd[1:]))
+                    except ValueError:
+                        continue
+                    if mcode in (3, 4):
+                        lineSpindle = True
+                    elif mcode == 5:
+                        lineSpindle = False
+
+                cnc.motionStart(cmds)
+                if lineSpindle and cnc.gcode in (1, 2, 3):
+                    path = cnc.motionPath()
+                    if len(path) == 2 and path[0][:2] == path[1][:2]:
+                        x, y = path[0][:2]
+                        if xmin <= x <= xmax and ymin <= y <= ymax:
+                            addPoint(x, y)
+                    else:
+                        for start, end in zip(path, path[1:]):
+                            addSegment(
+                                start[0], start[1], end[0], end[1]
+                            )
+                cnc.motionEnd()
+                spindleOn = lineSpindle
+        return points
 
     # ----------------------------------------------------------------------
     # Move blocks/lines up

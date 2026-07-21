@@ -277,7 +277,12 @@ class AutolevelGroup(CNCRibbon.ButtonGroup):
         b.grid(row=row, column=col, rowspan=3, padx=0, pady=0, sticky=NSEW)
         self.addWidget(b)
         tkExtra.Balloon.set(
-            b, _("Scan probed area for level information on Z plane"))
+            b,
+            _(
+                "Probe only along enabled spindle-on cutting moves within "
+                "the configured area"
+            ),
+        )
 
 
 # =============================================================================
@@ -1500,9 +1505,31 @@ class AutolevelFrame(CNCRibbon.PageFrame):
     def scan(self, event=None):
         if self.change():
             return
+        probe = self.app.gcode.probe
+        targets = self.app.gcode.cuttingProbePoints(
+            probe.xmin,
+            probe.xmax,
+            probe.ymin,
+            probe.ymax,
+            probe.xstep(),
+            probe.ystep(),
+        )
+        if not targets:
+            messagebox.showerror(
+                _("Probe Error"),
+                _(
+                    "No enabled spindle-on cutting moves were found inside "
+                    "the probing area."
+                ),
+                parent=self.winfo_toplevel(),
+            )
+            return
+        lines = probe.scan(targets)
         self.event_generate("<<DrawProbe>>")
-        # absolute
-        self.app.run(lines=self.app.gcode.probe.scan())
+        self.app.setStatus(
+            _("Generated {0} cut-path probe points").format(len(targets))
+        )
+        self.app.run(lines=lines)
 
     # -----------------------------------------------------------------------
     # Scan autolevel margins

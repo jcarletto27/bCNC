@@ -125,8 +125,8 @@ installation directory.
 - Easy probing:
   - simple probing
   - center finder with a probing ring
-  - **auto leveling**, Z-probing and auto leveling by altering the g-code during
-    sending (or permanently autoleveling the g-code file).
+  - **auto leveling**, cut-path-only Z-probing and auto leveling by altering the
+    g-code during sending (or permanently autoleveling the g-code file).
   - height color map display
   - create g-code by jogging and recording points (can even use camera for this)
   - **manual tool change** expansion and automatic tool length probing

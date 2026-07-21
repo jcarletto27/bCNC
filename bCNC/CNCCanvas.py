@@ -1752,17 +1752,35 @@ class CNCCanvas(Canvas):
 
         # Draw probe grid
         probe = self.gcode.probe
-        for x in bmath.frange(probe.xmin, probe.xmax + 0.00001, probe.xstep()):
-            xyz = [(x, probe.ymin, 0.0), (x, probe.ymax, 0.0)]
-            item = self.create_line(
-                self.plotCoords(xyz), tag="Probe", fill="Yellow")
-            self.tag_lower(item)
+        if probe.mode == "grid":
+            for x in bmath.frange(
+                probe.xmin, probe.xmax + 0.00001, probe.xstep()
+            ):
+                xyz = [(x, probe.ymin, 0.0), (x, probe.ymax, 0.0)]
+                item = self.create_line(
+                    self.plotCoords(xyz), tag="Probe", fill="Yellow")
+                self.tag_lower(item)
 
-        for y in bmath.frange(probe.ymin, probe.ymax + 0.00001, probe.ystep()):
-            xyz = [(probe.xmin, y, 0.0), (probe.xmax, y, 0.0)]
-            item = self.create_line(
-                self.plotCoords(xyz), tag="Probe", fill="Yellow")
-            self.tag_lower(item)
+            for y in bmath.frange(
+                probe.ymin, probe.ymax + 0.00001, probe.ystep()
+            ):
+                xyz = [(probe.xmin, y, 0.0), (probe.xmax, y, 0.0)]
+                item = self.create_line(
+                    self.plotCoords(xyz), tag="Probe", fill="Yellow")
+                self.tag_lower(item)
+        else:
+            for u, v in self.plotCoords(
+                [(x, y, 0.0) for x, y in probe.targets]
+            ):
+                item = self.create_oval(
+                    u - 2,
+                    v - 2,
+                    u + 2,
+                    v + 2,
+                    tag="Probe",
+                    outline="Yellow",
+                )
+                self.tag_lower(item)
 
         # Draw probe points
         for i, uv in enumerate(self.plotCoords(probe.points)):
@@ -1778,10 +1796,12 @@ class CNCCanvas(Canvas):
         # Draw image map if numpy exists
         if (
             numpy is not None
-            and probe.matrix
+            and not probe.isEmpty()
             and self.view in (VIEW_XY, VIEW_ISO1, VIEW_ISO2, VIEW_ISO3)
         ):
-            array = numpy.array(list(reversed(probe.matrix)), numpy.float32)
+            array = numpy.array(
+                list(reversed(probe.surfaceMatrix())), numpy.float32
+            )
 
             lw = array.min()
             hg = array.max()
