@@ -2623,7 +2623,9 @@ class Application(Tk, Sender):
                     n += 1
             # set it at the end to be sure that all lines are queued
             self._runLines = n
-        self.queue.put((WAIT,))  # wait at the end to become idle
+        # Mark the final wait explicitly. Once the controller reports idle,
+        # Sender can finish the run without relying only on line accounting.
+        self.queue.put((WAIT, "run-end"))
 
         self.setStatus(_("Running..."))
         self.statusbar.setLimits(0, self._runLines)

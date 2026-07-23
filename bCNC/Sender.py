@@ -110,6 +110,7 @@ class Sender:
         self.runningPrev = None
         self.cleanAfter = False
         self._runLines = 0
+        self._runEndWait = False
         self._quit = 0  # Quit counter to exit program
         self._stop = False  # Raise to stop current run
         self._pause = False  # machine is on Hold
@@ -649,6 +650,7 @@ class Sender:
         self._quit = 0
         self._pause = False
         self._paths = None
+        self._runEndWait = False
         self.running = True
         self.disable()
         self.emptyQueue()
@@ -671,8 +673,20 @@ class Sender:
         self._quit = 0
         self._msg = None
         self._pause = False
+        self._runEndWait = False
         self.running = False
         CNC.vars["running"] = False
+
+    # ----------------------------------------------------------------------
+    # Complete a run when its final wait-for-idle marker has been satisfied.
+    # The received-line count is useful for progress reporting, but some
+    # controllers emit probe/status responses that make it unsuitable as the
+    # sole signal that a run has ended.
+    # ----------------------------------------------------------------------
+    def finishRunWait(self):
+        if self._runEndWait and not self.sio_wait:
+            self._runEndWait = False
+            self.runEnded()
 
     # ----------------------------------------------------------------------
     # Stop the current run
@@ -748,6 +762,9 @@ class Sender:
                         if tosend[0] == WAIT:
                             # Don't count WAIT until we are idle!
                             self.sio_wait = True
+                            self._runEndWait = (
+                                len(tosend) > 1 and tosend[1] == "run-end"
+                            )
                         elif tosend[0] == MSG:
                             # Count executed commands as well
                             self._gcount += 1
@@ -836,6 +853,7 @@ class Sender:
                     pass
                 else:
                     self.log.put((Sender.MSG_RECEIVE, line))
+                self.finishRunWait()
 
             # Received external message to stop
             if self._stop:
